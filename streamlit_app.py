@@ -7,6 +7,22 @@ import warnings
 import numpy as np
 from datetime import datetime
 import warnings
+import subprocess
+import sys
+
+# Auto-install Playwright browsers on first run
+@st.cache_resource
+def install_playwright():
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
+                      check=True, capture_output=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], 
+                      check=True, capture_output=True)
+    except Exception as e:
+        st.error(f"Failed to install Playwright: {e}")
+
+# Call at startup
+install_playwright()
 
 warnings.filterwarnings('ignore', message='.*use_container_width.*')
 
