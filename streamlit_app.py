@@ -63,7 +63,7 @@ def scrape_symbols():
         finally:
             browser.close()
 
-def check_strategy(symbol, lookback_days=80, signal_days=5):       
+def check_strategy(symbol, lookback_days=80, signal_days=5, volume_filter=False, breakout_strength_filter=False):       
     try:
         ticker = f"{symbol}.NS"
        
@@ -80,7 +80,7 @@ def check_strategy(symbol, lookback_days=80, signal_days=5):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        df = df[['Open', 'High', 'Low', 'Close']].copy()
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
 
         # Calculate 200 EMA
         df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
@@ -96,12 +96,27 @@ def check_strategy(symbol, lookback_days=80, signal_days=5):
         df['last_below_idx'] = df['idx'].where(df['Below_200']).ffill()
         df['days_since_below'] = df['idx'] - df['last_below_idx']
         
-        # Define Buy Signal
-        df['Buy_Signal'] = (
+        # Calculate average volume (20-day)
+        df['Avg_Volume_20'] = df['Volume'].rolling(window=20).mean()
+        
+        # Define Buy Signal - Base condition
+        buy_signal_base = (
             (df['Close'] > df['Prior_ATH']) &
             (df['days_since_below'] <= lookback_days) &
             (df['days_since_below'] >= 0)
         )
+        
+        # Add Volume Filter if enabled
+        if volume_filter:
+            volume_condition = df['Volume'] > (df['Avg_Volume_20'] * 1.5)
+            buy_signal_base = buy_signal_base & volume_condition
+        
+        # Add Breakout Strength Filter if enabled (close at least 1% above prior ATH)
+        if breakout_strength_filter:
+            breakout_strength = ((df['Close'] - df['Prior_ATH']) / df['Prior_ATH'] * 100) >= 1.0
+            buy_signal_base = buy_signal_base & breakout_strength
+        
+        df['Buy_Signal'] = buy_signal_base
 
         # Check last N days (dynamic based on signal_days parameter)
         recent_data = df.tail(signal_days)                   
@@ -139,7 +154,7 @@ def check_strategy(symbol, lookback_days=80, signal_days=5):
     except Exception as e:
         return None
 
-def scan_stocks(symbols, progress_bar, status_text, signal_days=5, lookback_days=80):
+def scan_stocks(symbols, progress_bar, status_text, signal_days=5, lookback_days=80, volume_filter=False, breakout_strength_filter=False):
     """Scan stocks for buy signals"""
     execution_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -150,7 +165,8 @@ def scan_stocks(symbols, progress_bar, status_text, signal_days=5, lookback_days
         status_text.text(f"Analyzing {symbol} ({i+1}/{total})...")
         progress_bar.progress((i + 1) / total)
 
-        signals = check_strategy(symbol, lookback_days=lookback_days, signal_days=signal_days)
+        signals = check_strategy(symbol, lookback_days=lookback_days, signal_days=signal_days, 
+                                volume_filter=volume_filter, breakout_strength_filter=breakout_strength_filter)
 
         if signals:
             for s in signals:
@@ -220,27 +236,67 @@ with col_input2:
     )
     st.caption(f"Stocks must have been below 200 EMA within last **{lookback_days}** days")
 
+# Filter checkboxes
+st.markdown("### 🎯 Advanced Filters")
+col_filter1, col_filter2 = st.columns(2)
+
+with col_filter1:
+    volume_filter = st.checkbox(
+        "📊 Volume Confirmation",
+        value=False,
+        help="Require volume to be 1.5x above 20-day average on breakout day"
+    )
+    if volume_filter:
+        st.caption("✅ Volume must be >1.5x average")
+
+with col_filter2:
+    breakout_strength_filter = st.checkbox(
+        "💪 Breakout Strength",
+        value=False,
+        help="Require close to be at least 1% above prior ATH"
+    )
+    if breakout_strength_filter:
+        st.caption("✅ Close must be ≥1% above ATH")
+
+st.divider()
+
+# Fetch or use cached symbols
+if 'symbols' not in st.session_state:
+    with st.spinner("Fetching symbols from ChartInk for this session..."):
+        try:
+            num_symbols, symbols = scrape_symbols()
+            st.session_state['symbols'] = symbols
+            st.session_state['num_symbols'] = num_symbols
+            st.success(f"✅ Loaded {num_symbols} symbols for this session")
+        except Exception as e:
+            st.error(f"❌ Failed to fetch symbols: {str(e)}")
+            st.stop()
+else:
+    st.info(f"ℹ️ Using {st.session_state['num_symbols']} symbols from session cache")
+    with st.expander("View symbols"):
+        st.write(st.session_state['symbols'])
+
 if st.button("🚀 Run Full Scanner", type="primary", use_container_width=True):
     with st.spinner("Starting scanner..."):
         try:
-            # Step 1: Scrape symbols
-            st.info("**Step 1:** Scraping symbols from ChartInk...")
-            num_symbols, symbols = scrape_symbols()
-            st.success(f"✅ Found {num_symbols} symbols")
-            
-            # Store in session state
-            st.session_state['symbols'] = symbols
-            
-            # Show symbols in expander
-            with st.expander("View scraped symbols"):
-                st.write(symbols)
+            # Use symbols from session state
+            symbols = st.session_state['symbols']
             
             # Step 2: Scan stocks
-            st.info(f"**Step 2:** Analyzing stocks for buy signals (last {signal_days} days, below 200 EMA within {lookback_days} days)...")
+            filters_text = []
+            if volume_filter:
+                filters_text.append("Volume Filter ON")
+            if breakout_strength_filter:
+                filters_text.append("Breakout Strength ON")
+            filters_display = f" ({', '.join(filters_text)})" if filters_text else ""
+            
+            st.info(f"**Analyzing stocks** for buy signals (last {signal_days} days, below 200 EMA within {lookback_days} days){filters_display}...")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            result_df = scan_stocks(symbols, progress_bar, status_text, signal_days=signal_days, lookback_days=lookback_days)
+            result_df = scan_stocks(symbols, progress_bar, status_text, signal_days=signal_days, 
+                                  lookback_days=lookback_days, volume_filter=volume_filter, 
+                                  breakout_strength_filter=breakout_strength_filter)
             
             progress_bar.empty()
             status_text.empty()
@@ -250,6 +306,8 @@ if st.button("🚀 Run Full Scanner", type="primary", use_container_width=True):
                 st.session_state['results'] = result_df
                 st.session_state['signal_days_used'] = signal_days
                 st.session_state['lookback_days_used'] = lookback_days
+                st.session_state['volume_filter_used'] = volume_filter
+                st.session_state['breakout_filter_used'] = breakout_strength_filter
                 
                 st.success(f"🎉 Found {len(result_df)} buy signals!")
                 
@@ -303,7 +361,17 @@ if st.button("📊 View Previous Results", use_container_width=True):
         df = st.session_state['results']
         days_used = st.session_state.get('signal_days_used', 'N/A')
         lookback_used = st.session_state.get('lookback_days_used', 'N/A')
-        st.success(f"Loaded {len(df)} signals from previous run (signal days: {days_used}, lookback days: {lookback_used})")
+        vol_filter = st.session_state.get('volume_filter_used', False)
+        breakout_filter = st.session_state.get('breakout_filter_used', False)
+        
+        filters_used = []
+        if vol_filter:
+            filters_used.append("Volume Filter")
+        if breakout_filter:
+            filters_used.append("Breakout Strength")
+        filters_text = f" | Filters: {', '.join(filters_used)}" if filters_used else " | No filters"
+        
+        st.success(f"Loaded {len(df)} signals from previous run (signal days: {days_used}, lookback days: {lookback_used}{filters_text})")
         
         # Display metrics
         col_a, col_b, col_c = st.columns(3)
@@ -337,16 +405,30 @@ st.divider()
 if st.button("🗑️ Clear Results", use_container_width=False):
     if 'results' in st.session_state:
         del st.session_state['results']
-        if 'symbols' in st.session_state:
-            del st.session_state['symbols']
         if 'signal_days_used' in st.session_state:
             del st.session_state['signal_days_used']
         if 'lookback_days_used' in st.session_state:
             del st.session_state['lookback_days_used']
+        if 'volume_filter_used' in st.session_state:
+            del st.session_state['volume_filter_used']
+        if 'breakout_filter_used' in st.session_state:
+            del st.session_state['breakout_filter_used']
         st.success("✅ Results cleared!")
         st.rerun()
     else:
         st.info("No results to clear.")
+
+# Add button to refresh symbols
+if st.button("🔄 Refresh Symbols from ChartInk", use_container_width=False):
+    with st.spinner("Fetching fresh symbols from ChartInk..."):
+        try:
+            num_symbols, symbols = scrape_symbols()
+            st.session_state['symbols'] = symbols
+            st.session_state['num_symbols'] = num_symbols
+            st.success(f"✅ Refreshed! Loaded {num_symbols} new symbols")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Failed to refresh symbols: {str(e)}")
 
 # Footer
 st.divider()
