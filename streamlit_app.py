@@ -16,12 +16,12 @@ def install_playwright():
     try:
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
                       check=True, capture_output=True)
+        # Ignore deps install failure - not critical
         subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], 
-                      check=True, capture_output=True)
-    except Exception as e:
-        st.error(f"Failed to install Playwright: {e}")
+                      capture_output=True)  # Remove check=True
+    except:
+        pass  # Silently fail
 
-# Call at startup
 install_playwright()
 
 warnings.filterwarnings('ignore', message='.*use_container_width.*')
@@ -63,7 +63,7 @@ def scrape_symbols():
         finally:
             browser.close()
 
-def check_strategy(symbol, lookback_days=80):       
+def check_strategy(symbol, lookback_days=80, signal_days=5):       
     try:
         ticker = f"{symbol}.NS"
        
@@ -103,7 +103,8 @@ def check_strategy(symbol, lookback_days=80):
             (df['days_since_below'] >= 0)
         )
 
-        recent_data = df.tail(5)                   
+        # Check last N days (dynamic based on signal_days parameter)
+        recent_data = df.tail(signal_days)                   
         
         if recent_data['Buy_Signal'].any():
             signal_rows = recent_data[recent_data['Buy_Signal']]
@@ -138,7 +139,7 @@ def check_strategy(symbol, lookback_days=80):
     except Exception as e:
         return None
 
-def scan_stocks(symbols, progress_bar, status_text):
+def scan_stocks(symbols, progress_bar, status_text, signal_days=5, lookback_days=80):
     """Scan stocks for buy signals"""
     execution_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -149,7 +150,7 @@ def scan_stocks(symbols, progress_bar, status_text):
         status_text.text(f"Analyzing {symbol} ({i+1}/{total})...")
         progress_bar.progress((i + 1) / total)
 
-        signals = check_strategy(symbol)
+        signals = check_strategy(symbol, lookback_days=lookback_days, signal_days=signal_days)
 
         if signals:
             for s in signals:
@@ -183,124 +184,152 @@ st.divider()
 # Sidebar for settings
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.info("This scanner finds stocks that:\n- Broke all-time high\n- Were below 200 EMA within last 80 days")
+    st.info("This scanner finds stocks that:\n- Broke all-time high\n- Were below 200 EMA within configurable days")
     
     if st.button("ℹ️ About Strategy"):
         st.write("""
         **Strategy Logic:**
         1. Stock breaks its all-time high (ATH)
-        2. Stock was below 200 EMA within last 80 days
-        3. Signal generated in last 5 trading days
+        2. Stock was below 200 EMA within last N days (configurable: 40-120)
+        3. Signal generated in last M trading days (configurable: 1-30)
         """)
 
 # Main content
-col1, col2 = st.columns(2)
+# Input fields side by side
+col_input1, col_input2 = st.columns(2)
 
-with col1:
-    if st.button("🚀 Run Full Scanner", type="primary", use_container_width=True):
-        with st.spinner("Starting scanner..."):
-            try:
-                # Step 1: Scrape symbols
-                st.info("**Step 1:** Scraping symbols from ChartInk...")
-                num_symbols, symbols = scrape_symbols()
-                st.success(f"✅ Found {num_symbols} symbols")
-                
-                # Store in session state
-                st.session_state['symbols'] = symbols
-                
-                # Show symbols in expander
-                with st.expander("View scraped symbols"):
-                    st.write(symbols)
-                
-                # Step 2: Scan stocks
-                st.info("**Step 2:** Analyzing stocks for buy signals...")
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                result_df = scan_stocks(symbols, progress_bar, status_text)
-                
-                progress_bar.empty()
-                status_text.empty()
-                
-                if result_df is not None and not result_df.empty:
-                    # Store results in session state
-                    st.session_state['results'] = result_df
-                    
-                    st.success(f"🎉 Found {len(result_df)} buy signals!")
-                    
-                    # Display metrics
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        st.metric("Total Signals", len(result_df))
-                    with col_b:
-                        avg_gain = result_df['Diff %'].mean()
-                        st.metric("Avg Gain %", f"{avg_gain:.2f}%")
-                    with col_c:
-                        positive_signals = len(result_df[result_df['Diff %'] > 0])
-                        st.metric("Positive Signals", positive_signals)
-                    
-                    st.divider()
-                    
-                    # Display table
-                    st.dataframe(
-                        result_df,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Symbol": st.column_config.TextColumn("Symbol", width="small"),
-                            "Diff %": st.column_config.NumberColumn(
-                                "Diff %",
-                                format="%.2f%%",
-                            ),
-                        }
-                    )
-                    
-                    # Download button
-                    csv = result_df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download Results as CSV",
-                        data=csv,
-                        file_name=f"buy_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-                else:
-                    st.warning("No buy signals found in the last 5 days.")
-                    
-            except Exception as e:
-                st.error(f"❌ Error occurred: {str(e)}")
+with col_input1:
+    signal_days = st.number_input(
+        "📅 Look back for signals (days)",
+        min_value=1,
+        max_value=30,
+        value=5,
+        step=1,
+        help="Number of past trading days to check for buy signals (max: 30)"
+    )
+    st.caption(f"Scanner will check signals from last **{signal_days}** trading days")
 
-with col2:
-    if st.button("📊 View Previous Results", use_container_width=True):
-        if 'results' in st.session_state and st.session_state['results'] is not None:
-            df = st.session_state['results']
-            st.success(f"Loaded {len(df)} signals from previous run")
+with col_input2:
+    lookback_days = st.number_input(
+        "📊 Days since below 200 EMA",
+        min_value=40,
+        max_value=120,
+        value=80,
+        step=5,
+        help="Maximum days since price was below 200 EMA (range: 40-120)"
+    )
+    st.caption(f"Stocks must have been below 200 EMA within last **{lookback_days}** days")
+
+if st.button("🚀 Run Full Scanner", type="primary", use_container_width=True):
+    with st.spinner("Starting scanner..."):
+        try:
+            # Step 1: Scrape symbols
+            st.info("**Step 1:** Scraping symbols from ChartInk...")
+            num_symbols, symbols = scrape_symbols()
+            st.success(f"✅ Found {num_symbols} symbols")
             
-            # Display metrics
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.metric("Total Signals", len(df))
-            with col_b:
-                avg_gain = df['Diff %'].mean()
-                st.metric("Avg Gain %", f"{avg_gain:.2f}%")
-            with col_c:
-                positive_signals = len(df[df['Diff %'] > 0])
-                st.metric("Positive Signals", positive_signals)
+            # Store in session state
+            st.session_state['symbols'] = symbols
             
-            st.divider()
+            # Show symbols in expander
+            with st.expander("View scraped symbols"):
+                st.write(symbols)
             
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            # Step 2: Scan stocks
+            st.info(f"**Step 2:** Analyzing stocks for buy signals (last {signal_days} days, below 200 EMA within {lookback_days} days)...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"previous_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        else:
-            st.warning("No previous results found. Run the scanner first!")
+            result_df = scan_stocks(symbols, progress_bar, status_text, signal_days=signal_days, lookback_days=lookback_days)
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            if result_df is not None and not result_df.empty:
+                # Store results in session state
+                st.session_state['results'] = result_df
+                st.session_state['signal_days_used'] = signal_days
+                st.session_state['lookback_days_used'] = lookback_days
+                
+                st.success(f"🎉 Found {len(result_df)} buy signals!")
+                
+                # Display metrics
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("Total Signals", len(result_df))
+                with col_b:
+                    avg_gain = result_df['Diff %'].mean()
+                    st.metric("Avg Gain %", f"{avg_gain:.2f}%")
+                with col_c:
+                    positive_signals = len(result_df[result_df['Diff %'] > 0])
+                    st.metric("Positive Signals", positive_signals)
+                
+                st.divider()
+                
+                # Display table
+                st.dataframe(
+                    result_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+                        "Diff %": st.column_config.NumberColumn(
+                            "Diff %",
+                            format="%.2f%%",
+                        ),
+                    }
+                )
+                
+                # Download button
+                csv = result_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Results as CSV",
+                    data=csv,
+                    file_name=f"buy_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.warning(f"No buy signals found in the last {signal_days} days.")
+                
+        except Exception as e:
+            st.error(f"❌ Error occurred: {str(e)}")
+
+st.divider()
+
+# View Previous Results button - now below the main results
+if st.button("📊 View Previous Results", use_container_width=True):
+    if 'results' in st.session_state and st.session_state['results'] is not None:
+        df = st.session_state['results']
+        days_used = st.session_state.get('signal_days_used', 'N/A')
+        lookback_used = st.session_state.get('lookback_days_used', 'N/A')
+        st.success(f"Loaded {len(df)} signals from previous run (signal days: {days_used}, lookback days: {lookback_used})")
+        
+        # Display metrics
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Total Signals", len(df))
+        with col_b:
+            avg_gain = df['Diff %'].mean()
+            st.metric("Avg Gain %", f"{avg_gain:.2f}%")
+        with col_c:
+            positive_signals = len(df[df['Diff %'] > 0])
+            st.metric("Positive Signals", positive_signals)
+        
+        st.divider()
+        
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name=f"previous_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    else:
+        st.warning("No previous results found. Run the scanner first!")
 
 st.divider()
 
@@ -310,6 +339,10 @@ if st.button("🗑️ Clear Results", use_container_width=False):
         del st.session_state['results']
         if 'symbols' in st.session_state:
             del st.session_state['symbols']
+        if 'signal_days_used' in st.session_state:
+            del st.session_state['signal_days_used']
+        if 'lookback_days_used' in st.session_state:
+            del st.session_state['lookback_days_used']
         st.success("✅ Results cleared!")
         st.rerun()
     else:
@@ -317,4 +350,4 @@ if st.button("🗑️ Clear Results", use_container_width=False):
 
 # Footer
 st.divider()
-st.caption("Stock Scanner v1.0 | Data source: ChartInk & Yahoo Finance")
+st.caption("Stock Scanner made by Darshan Ramani with ❤️ | Data source: ChartInk & Yahoo Finance")
