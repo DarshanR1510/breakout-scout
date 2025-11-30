@@ -1,12 +1,6 @@
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright
 import csv
-import time
 import pandas as pd
 import yfinance as yf
 import warnings
@@ -24,64 +18,34 @@ st.set_page_config(
 )
 
 def scrape_symbols():
-    """Scrape symbols from chartink and return list"""
+    """Scrape symbols from chartink using Playwright"""
     url = "https://chartink.com/screener/within-2-of-52"
-
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.binary_location = "/usr/bin/chromium"
-
-    # Use webdriver-manager for ChromeDriver
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
-    driver.execute_cdp_cmd('Browser.grantPermissions', {
-        'origin': 'https://chartink.com',
-        'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite']
-    })
-
-    try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 20)
-
-        # Click "Copy" button
-        copy_button = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//div[contains(@class,'secondary-button') and .//span[normalize-space()='Copy']]"
-                )
-            )
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            permissions=["clipboard-read", "clipboard-write"]
         )
-        copy_button.click()
-
-        # Click "symbols" in the popup
-        symbols_option = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//span[span[normalize-space()='symbols']]"
-                )
-            )
-        )
-        symbols_option.click()
-        time.sleep(1)
-
-        # Read from clipboard
-        clipboard_text = driver.execute_script("""
-            return navigator.clipboard.readText();
-        """)
+        page = context.new_page()
         
-        symbols = [s.strip() for s in clipboard_text.split(",") if s.strip()]
-
-        return len(symbols), symbols
-
-    finally:
-        driver.quit()
+        try:
+            page.goto(url, wait_until="networkidle")
+            
+            # Click Copy button
+            page.click("//div[contains(@class,'secondary-button') and .//span[normalize-space()='Copy']]")
+            
+            # Click symbols option
+            page.click("//span[span[normalize-space()='symbols']]")
+            page.wait_for_timeout(1000)
+            
+            # Get clipboard content
+            clipboard_text = page.evaluate("() => navigator.clipboard.readText()")
+            symbols = [s.strip() for s in clipboard_text.split(",") if s.strip()]
+            
+            return len(symbols), symbols
+            
+        finally:
+            browser.close()
 
 def check_strategy(symbol, lookback_days=80):       
     try:
