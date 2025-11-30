@@ -3,4 +3,4 @@ selenium
 pandas
 yfinance
 numpy
-pyperclip
+webdriver-manager
